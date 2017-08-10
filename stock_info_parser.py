@@ -20,7 +20,7 @@ sectors = ('automotive', )
 
 
 MONTHS = ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec')
-EMPTY_VALUES = ('', '-', '*-', '_')
+EMPTY_VALUES = ('', '-', '*-', '* -', '-%', '- %')
 
 
 db = SqliteDatabase('stocks.db')
@@ -77,13 +77,14 @@ class FinancialInfo(BaseModel):
 
 class IncomeStatement(BaseModel):
 
+    symbol = CharField()
     month_of_year = IntegerField()
     year = IntegerField()
     month_year_str = CharField()
-    net_sales = DoubleField()
-    other_income = DoubleField()
-    pbdit = DoubleField()
-    net_profit = DoubleField()
+    net_sales = DoubleField(null=True)
+    other_income = DoubleField(null=True)
+    pbdit = DoubleField(null=True)
+    net_profit = DoubleField(null=True)
 
     class Meta:
         database = db
@@ -92,15 +93,16 @@ class IncomeStatement(BaseModel):
 
 class BalanceSheet(BaseModel):
 
-    month = CharField()
+    symbol = CharField()
+    month_of_year = IntegerField()
     year = IntegerField()
     month_year_str = CharField()
-    total_share_capital = DoubleField()
-    net_worth = DoubleField()
-    total_debt = DoubleField()
-    net_block = DoubleField()
-    investments = DoubleField()
-    total_assets = DoubleField()
+    total_share_capital = DoubleField(null=True)
+    net_worth = DoubleField(null=True)
+    total_debt = DoubleField(null=True)
+    net_block = DoubleField(null=True)
+    investments = DoubleField(null=True)
+    total_assets = DoubleField(null=True)
 
     class Meta:
         database = db
@@ -139,7 +141,7 @@ def populate_company_info():
 
 
 def parse_company_page(company_info):
-    global MONTHS
+    global MONTHS, EMPTY_VALUES
 
     print('Parsing url: ', company_info.mc_url)
     resp = requests.get(company_info.mc_url)
@@ -173,34 +175,52 @@ def parse_company_page(company_info):
                                  dividend_pct=div_pct, industry_pe_ratio=industry_pe_ratio, eps=eps,
                                  pc_ratio=pc_ratio, pb_ratio=pb_ratio, div_yield_pct=div_yield_pct, face_value=face_value)
 
-        with open('fin-info.dat', mode='wb') as file:
-            import pickle
-            pickle.dump(fin_info, file)
-
         # insert to db
         fin_info.save()
 
     _create_fin_info('standalone')
     _create_fin_info('consolidated')
 
-    div = soup.find('div', {'id': 'findet_1'})
-    table = div.find('table')
-    rows = table.find_all('tr')
-    row_iter = iter(rows)
+    # parse financial statement
+    try:
+        div = soup.find('div', {'id': 'findet_1'})
+        table = div.find('table')
+        rows = table.find_all('tr')
+        row_iter = iter(rows)
 
-    month_years = [x.text for x in next(row_iter).find_all('td')][1:-1]
-    month_year_tuples = [(MONTHS.index(month) + 1, 2000 + int(year)) for month, year in [month_year.split("'") for month_year in month_years]]
-    months = [month for month, _ in month_year_tuples]
-    years = [year for _, year in month_year_tuples]
+        month_years = [x.text for x in next(row_iter).find_all('td')][1:]
+        month_year_tuples = [(MONTHS.index(month) + 1, 2000 + int(year)) for month, year in [month_year.split("'") for month_year in month_years]]
+        months = [month for month, _ in month_year_tuples]
+        years = [year for _, year in month_year_tuples]
 
-    cols = ['net_sales', 'other_income', 'pbdit', 'net_profit']
-    col_values = defaultdict(list)
-    for col, row in zip(cols, row_iter):
-        col_values[col].extend([None if x.text.strip() in EMPTY_VALUES else float(x.text.strip().replace(',', '')) for x in row.find_all('td')[1:-1]])
+        cols = ['net_sales', 'other_income', 'pbdit', 'net_profit']
+        col_values = defaultdict(list)
+        for col, row in zip(cols, row_iter):
+            col_values[col].extend([None if x.text.strip() in EMPTY_VALUES else float(x.text.strip().replace(',', '')) for x in row.find_all('td')[1:]])
 
-    for x1, x2, x3, x4, x5, x6, x7 in zip(months, years, month_years, col_values['net_sales'], col_values['other_income'], col_values['pbdit'], col_values['net_profit']):
-        income_stmt = IncomeStatement(month_of_year=x1, year=x2, month_year_str=x3, net_sales=x4, other_income=x5, pbdit=x6, net_profit=x7)
-        income_stmt.save()
+        for x1, x2, x3, x4, x5, x6, x7 in zip(months, years, month_years, col_values['net_sales'], col_values['other_income'], col_values['pbdit'], col_values['net_profit']):
+            income_stmt = IncomeStatement(symbol=symbol, month_of_year=x1, year=x2, month_year_str=x3, net_sales=x4, other_income=x5, pbdit=x6, net_profit=x7)
+            income_stmt.save()
+    except Exception as ex:
+        print('Error parsing financial statment from company page for company = ', company_info.company_name, ', error = ', ex)
+        traceback.print_exc(file=sys.stderr)
+
+    # parse balance sheet
+    try:
+        div = soup.find('div', {'id': 'findet_11'})
+        month_year_str = div.find('div', {'class': 'FR w80 gL_10 tar'}).text.strip()[:6]
+        month_year_tuple = month_year_str.split("'")
+        month_of_year, year = MONTHS.index(month_year_tuple[0]) + 1, 2000 + int(month_year_tuple[1])
+
+        table = div.find('table')
+        rows = table.find_all('tr')
+        values = [row.find('td', {'class': 'thc02 gD_12 tar'}).text.strip().replace(',', '') for row in rows]
+        values = [None if value in EMPTY_VALUES else float(value) for value in values]
+        balance_sheet = BalanceSheet(symbol=symbol, month_of_year=month_of_year, year=year, month_year_str=month_year_str, total_share_capital=values[0], net_worth=values[1], total_debt=values[2], net_block=values[3], investments=values[4], total_assets=values[5])
+        balance_sheet.save()
+    except Exception as ex:
+        print('Error parsing balance sheet from company page for company = ', company_info.company_name, ', error = ', ex)
+        traceback.print_exc(file=sys.stderr)
 
 
 def main():
